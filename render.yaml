@@ -15,6 +15,8 @@ services:
         value: "3.13.5"
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: "0"
+      - key: PYTHONUNBUFFERED
+        value: "1"
       - key: HEADLESS
         value: "1"
       - key: MAX_STUDIES_PER_RUN
