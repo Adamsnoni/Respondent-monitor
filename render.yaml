@@ -1,0 +1,23 @@
+services:
+  - type: worker
+    name: respondent-monitor
+    runtime: python
+    buildCommand: pip install -r requirements.txt && playwright install chromium && playwright install-deps chromium
+    startCommand: python respondent_monitor.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: HEADLESS
+        value: "1"
+      - key: MAX_STUDIES_PER_RUN
+        value: "40"
+      - key: LOG_LEVEL
+        value: "INFO"
+      - key: DB_PATH
+        value: "/data/respondent_studies.db"
+    disk:
+      name: respondent-db
+      mountPath: /data
+      sizeGB: 1

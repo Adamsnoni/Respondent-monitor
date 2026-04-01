@@ -1,0 +1,27 @@
+# Environments
+.venv/
+venv/
+.env
+.env.*
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+
+# Database
+respondent_studies.db
+*.db
+*.sqlite
+
+# OS generated files
+.DS_Store
+.DS_Store?
+
+# Logs
+*.log
+
+# Temp files
+tmp/
+temp/
