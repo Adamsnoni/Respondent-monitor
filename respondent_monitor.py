@@ -232,13 +232,25 @@ def send_telegram_alert(message: str) -> None:
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    response = requests.post(
-        url,
-        json={"chat_id": chat_id, "text": message, "disable_web_page_preview": False},
-        timeout=30,
-    )
-    response.raise_for_status()
-    logging.info("Telegram alert sent.")
+    logging.info("Attempting to send Telegram alert to chat_id: %s", chat_id)
+    try:
+        response = requests.post(
+            url,
+            json={"chat_id": chat_id, "text": message, "disable_web_page_preview": False},
+            timeout=30,
+        )
+        data = response.json() if response.text else {}
+        is_ok = data.get("ok")
+        if response.status_code == 200 and is_ok:
+            logging.info("Telegram alert sent successfully.")
+        else:
+            logging.error(
+                "Telegram rejected message. Status: %s, Response: %s. "
+                "Ensure bot token is correct, chat_id is valid, and bot has been started.",
+                response.status_code, response.text
+            )
+    except Exception as exc:
+        logging.error("Failed to send Telegram alert (network/other issue): %s", exc)
 
 
 def harvest_study_links(page, browse_url: str, max_links: int) -> List[str]:
@@ -365,8 +377,19 @@ def run_once() -> int:
     return 0
 
 
+def check_telegram_config() -> None:
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        logging.warning("Startup check: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing. Alerts are disabled.")
+    else:
+        masked_token = f"{token[:4]}...{token[-4:]}" if len(token) > 8 else "***"
+        logging.info("Startup check: Telegram configured (Chat ID: %s, Token: %s)", chat_id, masked_token)
+
+
 if __name__ == "__main__":
     setup_logging()
+    check_telegram_config()
     try:
         while True:
             logging.info("Starting monitoring cycle...")
