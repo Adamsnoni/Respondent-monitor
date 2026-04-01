@@ -253,6 +253,24 @@ def send_telegram_alert(message: str) -> None:
         logging.error("Failed to send Telegram alert (network/other issue): %s", exc)
 
 
+def is_unmoderated(text: str) -> bool:
+    text = text.lower()
+    
+    # Negative indicators (must exclude if present)
+    negatives = ["interview", "zoom", "call", "scheduled", "session", "1:1", "one-on-one"]
+    for neg in negatives:
+        if neg in text:
+            return False
+            
+    # Positive indicators (must match at least one)
+    positives = ["unmoderated", "self-paced", "take at your convenience", "complete at your own pace"]
+    for pos in positives:
+        if pos in text:
+            return True
+            
+    return False
+
+
 def harvest_study_links(page, browse_url: str, max_links: int) -> List[str]:
     logging.info("Opening browse page: %s", browse_url)
     page.goto(browse_url, wait_until="domcontentloaded", timeout=90000)
@@ -357,6 +375,14 @@ def run_once() -> int:
                 study = scrape_study_page(page, url)
                 if not study:
                     continue
+                
+                full_text = f"{study.title} {study.summary}"
+                if is_unmoderated(full_text):
+                    logging.info("Accepted (unmoderated): %s", study.title)
+                else:
+                    logging.info("Skipped (moderated): %s", study.title)
+                    continue
+
                 was_new = store.upsert(study)
                 if was_new:
                     new_studies.append(study)
