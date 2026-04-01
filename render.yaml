@@ -2,7 +2,6 @@ services:
   - type: worker
     name: respondent-monitor
     runtime: python
-    pythonVersion: 3.13.5
     buildCommand: |-
       pip install -r requirements.txt
       playwright install chromium
@@ -12,6 +11,8 @@ services:
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
+      - key: PYTHON_VERSION
+        value: "3.13.5"
       - key: HEADLESS
         value: "1"
       - key: MAX_STUDIES_PER_RUN
