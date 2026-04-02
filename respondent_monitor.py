@@ -361,18 +361,21 @@ def run_once() -> int:
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=headless,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--single-process"],
         )
         context = browser.new_context(user_agent=USER_AGENT)
-        page = context.new_page()
+        
+        main_page = context.new_page()
+        links = harvest_study_links(main_page, browse_url, max_studies)
+        main_page.close()
 
-        links = harvest_study_links(page, browse_url, max_studies)
         if not links:
             logging.warning("No study links found on browse page.")
 
         for url in links:
+            study_page = context.new_page()
             try:
-                study = scrape_study_page(page, url)
+                study = scrape_study_page(study_page, url)
                 if not study:
                     continue
                 
@@ -390,6 +393,8 @@ def run_once() -> int:
             except Exception as exc:
                 logging.exception("Failed to process %s: %s", url, exc)
                 continue
+            finally:
+                study_page.close()
 
         browser.close()
 
