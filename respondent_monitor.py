@@ -365,7 +365,6 @@ def run_once() -> int:
                 "--no-sandbox", 
                 "--disable-setuid-sandbox", 
                 "--disable-dev-shm-usage", 
-                "--single-process",
                 "--disable-gpu",
                 "--disable-software-rasterizer",
                 "--disable-extensions",
