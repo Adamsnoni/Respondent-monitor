@@ -349,9 +349,9 @@ def run_once() -> int:
     browse_url = os.getenv("RESPONDENT_BROWSE_URL", DEFAULT_BROWSE_URL).strip() or DEFAULT_BROWSE_URL
     headless = os.getenv("HEADLESS", "1").strip() != "0"
     try:
-        max_studies = int(os.getenv("MAX_STUDIES_PER_RUN", "40"))
+        max_studies = int(os.getenv("MAX_STUDIES_PER_RUN", "15"))
     except ValueError:
-        max_studies = 40
+        max_studies = 15
 
     db_path = resolve_db_path()
     logging.info("Using DB at: %s", db_path)
