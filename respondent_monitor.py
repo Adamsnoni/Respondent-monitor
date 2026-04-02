@@ -277,8 +277,8 @@ def harvest_study_links(page, browse_url: str, max_links: int) -> List[str]:
     page.goto(browse_url, wait_until="domcontentloaded", timeout=90000)
     page.wait_for_timeout(4000)
 
-    # Scroll to reveal lazy-loaded results
-    for _ in range(4):
+    # Scroll to reveal lazy-loaded results (Limit to 1 to save massive amount of memory)
+    for _ in range(1):
         page.mouse.wheel(0, 4000)
         page.wait_for_timeout(1500)
 
@@ -363,7 +363,7 @@ def run_once() -> int:
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=headless,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--js-flags=--max-old-space-size=128"]
         )
         browse_context = browser.new_context(user_agent=USER_AGENT)
         
@@ -398,7 +398,7 @@ def run_once() -> int:
                     "--disable-software-rasterizer",
                     "--disable-extensions",
                     "--mute-audio",
-                    "--js-flags=--max-old-space-size=256"
+                    "--js-flags=--max-old-space-size=128"
                 ],
             )
             
