@@ -254,19 +254,46 @@ def send_telegram_alert(message: str) -> None:
         logging.error("Failed to send Telegram alert (network/other issue): %s", exc)
 
 
-def is_unmoderated(text: str) -> bool:
+def is_unmoderated_study(text: str) -> bool:
     text = text.lower()
     
-    # Negative indicators (must exclude if present)
-    negatives = ["interview", "zoom", "call", "scheduled", "session", "1:1", "one-on-one"]
+    # Negative indicators
+    negatives = ["zoom", "call", "live session", "1:1", "one-on-one", "one on one"]
     for neg in negatives:
         if neg in text:
             return False
             
-    # Positive indicators (must match at least one)
-    positives = ["unmoderated", "self-paced", "take at your convenience", "complete at your own pace", "diary", "diary study"]
-    for pos in positives:
+    # Strong positive indicators
+    strong_positives = [
+        "unmoderated study", "unmoderated research study", 
+        "this is an unmoderated study", "participate in an unmoderated study", 
+        "self-paced unmoderated study"
+    ]
+    # Optional supporting indicators
+    support_positives = [
+        "self-paced", "self guided", "self-guided", "at your own pace", 
+        "complete on your own time", "take at your convenience"
+    ]
+    
+    for pos in strong_positives + support_positives:
         if pos in text:
+            return True
+            
+    return False
+
+def is_diary_study(text: str) -> bool:
+    text = text.lower()
+    
+    phrases = [
+        "diary study", "diary", "daily log", "daily logs", "daily check-in", 
+        "daily check in", "journal", "journaling", "track your", "tracking your", 
+        "record your", "log your", "over multiple days", "over several days", 
+        "multiple days", "for 3 days", "for 5 days", "for 7 days", "for 1 week", 
+        "for one week", "week-long", "longitudinal", "ongoing participation"
+    ]
+    
+    for phrase in phrases:
+        if phrase in text:
             return True
             
     return False
@@ -413,11 +440,16 @@ def run_once() -> int:
                         continue
                     
                     full_text = f"{study.title} {study.summary}"
-                    if is_unmoderated(full_text):
-                        logging.info("Accepted (unmoderated): %s", study.title)
-                    else:
-                        logging.info("Skipped (moderated): %s", study.title)
+                    
+                    if not is_diary_study(full_text):
+                        logging.info("Skipped (not Diary Study): %s", study.title)
                         continue
+                        
+                    if not is_unmoderated_study(full_text):
+                        logging.info("Skipped (not Unmoderated Study): %s", study.title)
+                        continue
+
+                    logging.info("Accepted (Diary Study + Unmoderated Study): %s", study.title)
 
                     was_new = store.upsert(study)
                     if was_new:
