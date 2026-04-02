@@ -361,10 +361,29 @@ def run_once() -> int:
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=headless,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--single-process"],
+            args=[
+                "--no-sandbox", 
+                "--disable-setuid-sandbox", 
+                "--disable-dev-shm-usage", 
+                "--single-process",
+                "--disable-gpu",
+                "--disable-software-rasterizer",
+                "--disable-extensions",
+                "--mute-audio",
+                "--js-flags=--max-old-space-size=256"
+            ],
         )
         context = browser.new_context(user_agent=USER_AGENT)
-        
+
+        # Block all visual network requests before they even touch memory
+        def intercept_route(route):
+            if route.request.resource_type in ["image", "media", "font", "stylesheet", "websocket"]:
+                route.abort()
+            else:
+                route.continue_()
+
+        context.route("**/*", intercept_route)
+
         main_page = context.new_page()
         links = harvest_study_links(main_page, browse_url, max_studies)
         main_page.close()
