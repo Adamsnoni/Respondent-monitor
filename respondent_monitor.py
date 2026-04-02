@@ -373,8 +373,6 @@ def run_once() -> int:
                 "--js-flags=--max-old-space-size=256"
             ],
         )
-        context = browser.new_context(user_agent=USER_AGENT)
-
         # Block all visual network requests before they even touch memory
         def intercept_route(route):
             if route.request.resource_type in ["image", "media", "font", "stylesheet", "websocket"]:
@@ -382,17 +380,22 @@ def run_once() -> int:
             else:
                 route.continue_()
 
-        context.route("**/*", intercept_route)
-
-        main_page = context.new_page()
+        # Phase 1: Harvest links using a temporary context
+        browse_context = browser.new_context(user_agent=USER_AGENT)
+        browse_context.route("**/*", intercept_route)
+        main_page = browse_context.new_page()
         links = harvest_study_links(main_page, browse_url, max_studies)
-        main_page.close()
+        browse_context.close()
 
         if not links:
             logging.warning("No study links found on browse page.")
 
+        # Phase 2: Scrape each link in a strict, isolated context to flush entire V8 / DOM memory map
         for url in links:
-            study_page = context.new_page()
+            study_context = browser.new_context(user_agent=USER_AGENT)
+            study_context.route("**/*", intercept_route)
+            study_page = study_context.new_page()
+            
             try:
                 study = scrape_study_page(study_page, url)
                 if not study:
@@ -413,7 +416,7 @@ def run_once() -> int:
                 logging.exception("Failed to process %s: %s", url, exc)
                 continue
             finally:
-                study_page.close()
+                study_context.close()
 
         browser.close()
 
