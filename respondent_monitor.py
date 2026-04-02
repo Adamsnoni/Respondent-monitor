@@ -25,6 +25,7 @@ Usage
 
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import re
@@ -358,66 +359,80 @@ def run_once() -> int:
     store = StudyStore(db_path)
     new_studies: List[Study] = []
 
+    # Phase 1: Harvest links using a temporary context
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=headless,
-            args=[
-                "--no-sandbox", 
-                "--disable-setuid-sandbox", 
-                "--disable-dev-shm-usage", 
-                "--disable-gpu",
-                "--disable-software-rasterizer",
-                "--disable-extensions",
-                "--mute-audio",
-                "--js-flags=--max-old-space-size=256"
-            ],
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
         )
-        # Block all visual network requests before they even touch memory
+        browse_context = browser.new_context(user_agent=USER_AGENT)
+        
+        # Block heavy visual resources
         def intercept_route(route):
             if route.request.resource_type in ["image", "media", "font", "stylesheet", "websocket"]:
                 route.abort()
             else:
                 route.continue_()
-
-        # Phase 1: Harvest links using a temporary context
-        browse_context = browser.new_context(user_agent=USER_AGENT)
+                
         browse_context.route("**/*", intercept_route)
         main_page = browse_context.new_page()
         links = harvest_study_links(main_page, browse_url, max_studies)
-        browse_context.close()
-
-        if not links:
-            logging.warning("No study links found on browse page.")
-
-        # Phase 2: Scrape each link in a strict, isolated context to flush entire V8 / DOM memory map
-        for url in links:
-            study_context = browser.new_context(user_agent=USER_AGENT)
-            study_context.route("**/*", intercept_route)
-            study_page = study_context.new_page()
-            
-            try:
-                study = scrape_study_page(study_page, url)
-                if not study:
-                    continue
-                
-                full_text = f"{study.title} {study.summary}"
-                if is_unmoderated(full_text):
-                    logging.info("Accepted (unmoderated): %s", study.title)
-                else:
-                    logging.info("Skipped (moderated): %s", study.title)
-                    continue
-
-                was_new = store.upsert(study)
-                if was_new:
-                    new_studies.append(study)
-                time.sleep(1.5)
-            except Exception as exc:
-                logging.exception("Failed to process %s: %s", url, exc)
-                continue
-            finally:
-                study_context.close()
-
         browser.close()
+
+    if not links:
+        logging.warning("No study links found on browse page.")
+
+    # Phase 2: Scrape in small batches to guarantee Chromium memory is fully wiped
+    batch_size = 5
+    for i in range(0, len(links), batch_size):
+        chunk = links[i : i + batch_size]
+        
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=headless,
+                args=[
+                    "--no-sandbox", 
+                    "--disable-setuid-sandbox", 
+                    "--disable-dev-shm-usage", 
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--disable-extensions",
+                    "--mute-audio",
+                    "--js-flags=--max-old-space-size=256"
+                ],
+            )
+            
+            for url in chunk:
+                study_context = browser.new_context(user_agent=USER_AGENT)
+                study_context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font", "stylesheet", "websocket"] else route.continue_())
+                study_page = study_context.new_page()
+                
+                try:
+                    study = scrape_study_page(study_page, url)
+                    if not study:
+                        continue
+                    
+                    full_text = f"{study.title} {study.summary}"
+                    if is_unmoderated(full_text):
+                        logging.info("Accepted (unmoderated): %s", study.title)
+                    else:
+                        logging.info("Skipped (moderated): %s", study.title)
+                        continue
+
+                    was_new = store.upsert(study)
+                    if was_new:
+                        new_studies.append(study)
+                    time.sleep(1.5)
+                except Exception as exc:
+                    logging.exception("Failed to process %s: %s", url, exc)
+                    continue
+                finally:
+                    study_context.close()
+            
+            browser.close()
+            
+        # Force Python to deep clean memory between batches
+        gc.collect()
 
     if new_studies:
         logging.info("%d new studies found.", len(new_studies))
