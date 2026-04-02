@@ -263,7 +263,7 @@ def is_unmoderated(text: str) -> bool:
             return False
             
     # Positive indicators (must match at least one)
-    positives = ["unmoderated", "self-paced", "take at your convenience", "complete at your own pace", "diary"]
+    positives = ["unmoderated", "self-paced", "take at your convenience", "complete at your own pace", "diary", "diary study"]
     for pos in positives:
         if pos in text:
             return True
