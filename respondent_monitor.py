@@ -68,6 +68,7 @@ class Study:
     title: str = ""
     reward: str = ""
     summary: str = ""
+    full_body_text: str = ""
     posted_hint: str = ""
     source: str = "public"
     first_seen_at: str = ""
@@ -370,6 +371,7 @@ def scrape_study_page(page, url: str) -> Optional[Study]:
         title=title,
         reward=reward,
         summary=summary,
+        full_body_text=body_text,
         posted_hint=posted_hint,
         source="public",
         first_seen_at=now,
@@ -444,13 +446,19 @@ def run_once() -> int:
                     if not study:
                         continue
                     
-                    full_text = f"{study.title} {study.summary}"
+                    # Combine everything to guarantee we don't miss metadata
+                    filter_blob = f"{study.title} {study.summary} {study.full_body_text}"
+                    
+                    if "unmoderated study" in filter_blob.lower():
+                        logging.info("DEBUG: 'unmoderated study' matched in text for %s", study.title)
                         
-                    if not is_unmoderated_study(full_text):
+                    if not is_unmoderated_study(filter_blob):
                         logging.info("Skipped (not Unmoderated Study): %s", study.title)
+                        excerpt = study.full_body_text[:120].replace('\n', ' ')
+                        logging.info("DEBUG Excerpt: %s...", excerpt)
                         continue
 
-                    if is_diary_study(full_text):
+                    if is_diary_study(filter_blob):
                         logging.info("Accepted (Unmoderated Study + Diary Study): %s", study.title)
                     else:
                         logging.info("Accepted (Unmoderated Study): %s", study.title)
