@@ -14,7 +14,7 @@ Environment variables
 - TELEGRAM_CHAT_ID: Telegram chat ID (required for alerts)
 - RESPONDENT_BROWSE_URL: optional, defaults to https://www.respondent.io/research-projects
 - HEADLESS: optional, 1 or 0, defaults to 1
-- MAX_STUDIES_PER_RUN: optional, defaults to 40
+- MAX_STUDIES_PER_RUN: optional, defaults to 20
 - LOG_LEVEL: optional, defaults to INFO
 - DB_PATH: optional, path to SQLite file, defaults to /data/respondent_studies.db
             (falls back to ./respondent_studies.db if /data is not writable)
@@ -210,25 +210,43 @@ def extract_summary_from_body(body_text: str, title: str) -> str:
             continue
         if "cookie" in line.lower() or "privacy" in line.lower():
             continue
-        return textwrap.shorten(line, width=220, placeholder="...")
+        return textwrap.shorten(line, width=300, placeholder="...")
     return ""
 
 
 def build_telegram_message(studies: List[Study]) -> str:
     lines = [f"🔔 New Respondent studies: {len(studies)}"]
+    
     for study in studies[:10]:
         title = study.title or "Untitled study"
-        reward = f" | {study.reward}" if study.reward else ""
+        reward = study.reward or "Not specified"
+        summary = study.summary or "No description"
         
-        full_text = f"{study.title} {study.summary}"
-        if is_diary_study(full_text):
-            lines.append(f"• {title}{reward}\n  Type: Diary Study\n  {study.url}")
+        full_text = f"{study.title} {study.summary} {study.full_body_text}".lower()
+        
+        if "unmoderated study" in full_text:
+            study_type = "Unmoderated Study"
+        elif "diary study" in full_text:
+            study_type = "Diary Study"
+        elif "moderated" in full_text:
+            study_type = "Moderated"
         else:
-            lines.append(f"• {title}{reward}\n  {study.url}")
+            study_type = "Unknown"
+            
+        study_block = (
+            "🚨 New Respondent Study\n\n"
+            f"• {title} | {reward}\n"
+            f"🧪 Type: {study_type}\n\n"
+            "📄 Description:\n"
+            f"{summary}\n\n"
+            f"🔗 {study.url}"
+        )
+        lines.append(study_block)
             
     if len(studies) > 10:
         lines.append(f"...and {len(studies) - 10} more")
-    return "\n".join(lines)
+        
+    return "\n\n---\n\n".join(lines)
 
 
 def send_telegram_alert(message: str) -> None:
@@ -383,9 +401,9 @@ def run_once() -> int:
     browse_url = os.getenv("RESPONDENT_BROWSE_URL", DEFAULT_BROWSE_URL).strip() or DEFAULT_BROWSE_URL
     headless = os.getenv("HEADLESS", "1").strip() != "0"
     try:
-        max_studies = int(os.getenv("MAX_STUDIES_PER_RUN", "15"))
+        max_studies = int(os.getenv("MAX_STUDIES_PER_RUN", "20"))
     except ValueError:
-        max_studies = 15
+        max_studies = 20
 
     db_path = resolve_db_path()
     logging.info("Using DB at: %s", db_path)
