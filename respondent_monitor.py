@@ -218,8 +218,13 @@ def build_telegram_message(studies: List[Study]) -> str:
     for study in studies[:10]:
         title = study.title or "Untitled study"
         reward = f" | {study.reward}" if study.reward else ""
-        lines.append(f"• {title}{reward}")
-        lines.append(study.url)
+        
+        full_text = f"{study.title} {study.summary}"
+        if is_diary_study(full_text):
+            lines.append(f"• {title}{reward}\n  Type: Diary Study\n  {study.url}")
+        else:
+            lines.append(f"• {title}{reward}\n  {study.url}")
+            
     if len(studies) > 10:
         lines.append(f"...and {len(studies) - 10} more")
     return "\n".join(lines)
@@ -440,16 +445,15 @@ def run_once() -> int:
                         continue
                     
                     full_text = f"{study.title} {study.summary}"
-                    
-                    if not is_diary_study(full_text):
-                        logging.info("Skipped (not Diary Study): %s", study.title)
-                        continue
                         
                     if not is_unmoderated_study(full_text):
                         logging.info("Skipped (not Unmoderated Study): %s", study.title)
                         continue
 
-                    logging.info("Accepted (Diary Study + Unmoderated Study): %s", study.title)
+                    if is_diary_study(full_text):
+                        logging.info("Accepted (Unmoderated Study + Diary Study): %s", study.title)
+                    else:
+                        logging.info("Accepted (Unmoderated Study): %s", study.title)
 
                     was_new = store.upsert(study)
                     if was_new:
