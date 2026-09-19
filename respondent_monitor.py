@@ -73,25 +73,34 @@ class Study:
     last_seen_at: str = ""
 
 
+# Legacy Database Compatibility:
+# Production uses an existing legacy SQLite database with schema:
+#   studies(id INTEGER PRIMARY KEY, title TEXT NOT NULL, link TEXT NOT NULL, payout TEXT, created_at TIMESTAMP, eligible_alerted INTEGER)
+# To preserve production data and prevent duplicate alerts:
+# 1. We inspect table columns dynamically via PRAGMA table_info(studies).
+# 2. If 'link' is present (legacy schema), we query/store in 'link' without requiring or querying a 'url' column.
+# 3. If 'url' is present (newer schema), we query/store in 'url'.
+# 4. Deduplication extracts the 24-character hex Respondent project ID from URLs (matching legacy /respondents/v2/projects/view/<ID>
+#    and new API /next/participants/projects/<ID>/<slug>?referralCode=...).
 class StudyStore:
     def __init__(self, path: str):
         self.path = path
         os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
         self.conn = sqlite3.connect(path)
         
-        # Inspect existing table columns
+        # Inspect existing table columns dynamically
         cursor = self.conn.execute("PRAGMA table_info(studies)")
         rows = cursor.fetchall()
         self.columns = [r[1] for r in rows] if rows else []
 
         if not self.columns:
-            # Create default VPS-compatible schema for brand new databases
+            # Create default legacy-compatible schema for brand new databases
             self.conn.execute(
                 """
                 CREATE TABLE studies (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT,
-                    link TEXT UNIQUE,
+                    title TEXT NOT NULL,
+                    link TEXT NOT NULL UNIQUE,
                     payout TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     eligible_alerted INTEGER DEFAULT 0
@@ -105,29 +114,42 @@ class StudyStore:
         self.has_url = "url" in self.columns
 
     def extract_study_id(self, url: str) -> str:
-        match = re.search(r'[a-f0-9]{24}', url.lower())
-        return match.group(0) if match else ""
+        if not url:
+            return ""
+        match = re.search(r'\b[a-f0-9]{24}\b', url.lower())
+        if match:
+            return match.group(0)
+        match2 = re.search(r'[a-f0-9]{24}', url.lower())
+        return match2.group(0) if match2 else ""
 
     def has(self, url: str) -> bool:
+        clean_url = normalize_url(url)
         study_id = self.extract_study_id(url)
         
-        if self.has_link:
-            if study_id:
+        # 1. Match by extracted 24-char project ID if available
+        if study_id:
+            if self.has_link:
                 row = self.conn.execute(
-                    "SELECT 1 FROM studies WHERE link = ? OR link LIKE ?", (url, f"%{study_id}%")
+                    "SELECT 1 FROM studies WHERE link LIKE ?", (f"%{study_id}%",)
                 ).fetchone()
-            else:
-                row = self.conn.execute("SELECT 1 FROM studies WHERE link = ?", (url,)).fetchone()
+                if row:
+                    return True
+
+            if self.has_url:
+                row = self.conn.execute(
+                    "SELECT 1 FROM studies WHERE url LIKE ?", (f"%{study_id}%",)
+                ).fetchone()
+                if row:
+                    return True
+
+        # 2. Exact URL match fallback
+        if self.has_link:
+            row = self.conn.execute("SELECT 1 FROM studies WHERE link = ?", (clean_url,)).fetchone()
             if row:
                 return True
 
         if self.has_url:
-            if study_id:
-                row = self.conn.execute(
-                    "SELECT 1 FROM studies WHERE url = ? OR url LIKE ?", (url, f"%{study_id}%")
-                ).fetchone()
-            else:
-                row = self.conn.execute("SELECT 1 FROM studies WHERE url = ?", (url,)).fetchone()
+            row = self.conn.execute("SELECT 1 FROM studies WHERE url = ?", (clean_url,)).fetchone()
             if row:
                 return True
 
@@ -135,14 +157,15 @@ class StudyStore:
 
     def upsert(self, study: Study) -> bool:
         """Returns True if inserted for the first time."""
-        if self.has(study.url):
+        clean_url = normalize_url(study.url)
+        if self.has(clean_url):
             return False
 
         if self.has_link:
             payout_val = study.reward
             self.conn.execute(
                 "INSERT INTO studies (title, link, payout) VALUES (?, ?, ?)",
-                (study.title, study.url, payout_val),
+                (study.title, clean_url, payout_val),
             )
             self.conn.commit()
             return True
@@ -154,7 +177,7 @@ class StudyStore:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    study.url,
+                    clean_url,
                     study.title,
                     study.reward,
                     study.summary,
@@ -191,13 +214,13 @@ def clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "")).strip()
 
 
-def normalize_url(url: str, base: str) -> str:
+def normalize_url(url: str, base: str = "") -> str:
     if not url:
         return ""
-    absolute = urljoin(base, url)
+    absolute = urljoin(base, url) if base else url
     parsed = urlparse(absolute)
-    # Keep only scheme, host, path; drop referral params to dedupe better.
-    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+    # Strip query parameters (referralCode, etc.) and fragments for clean deduplication
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
 
 
 def extract_reward(text: str) -> str:
@@ -401,7 +424,7 @@ def fetch_public_api_studies(max_studies: int = 50) -> List[Study]:
                 referral_link = str(item.get("referralLink", "")).strip()
                 
                 if referral_link:
-                    study_url = referral_link
+                    study_url = normalize_url(referral_link)
                 elif study_id:
                     study_url = f"https://app.respondent.io/projects/view/{study_id}"
                 else:
