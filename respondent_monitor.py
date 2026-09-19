@@ -78,32 +78,75 @@ class StudyStore:
         self.path = path
         os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
         self.conn = sqlite3.connect(path)
-        self.conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS studies (
-                url TEXT PRIMARY KEY,
-                title TEXT,
-                reward TEXT,
-                summary TEXT,
-                posted_hint TEXT,
-                source TEXT,
-                first_seen_at TEXT,
-                last_seen_at TEXT
+        
+        # Inspect existing table columns
+        cursor = self.conn.execute("PRAGMA table_info(studies)")
+        rows = cursor.fetchall()
+        self.columns = [r[1] for r in rows] if rows else []
+
+        if not self.columns:
+            # Create default VPS-compatible schema for brand new databases
+            self.conn.execute(
+                """
+                CREATE TABLE studies (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT,
+                    link TEXT UNIQUE,
+                    payout TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    eligible_alerted INTEGER DEFAULT 0
+                )
+                """
             )
-            """
-        )
-        self.conn.commit()
+            self.conn.commit()
+            self.columns = ["id", "title", "link", "payout", "created_at", "eligible_alerted"]
+
+        self.has_link = "link" in self.columns
+        self.has_url = "url" in self.columns
+
+    def extract_study_id(self, url: str) -> str:
+        match = re.search(r'[a-f0-9]{24}', url.lower())
+        return match.group(0) if match else ""
 
     def has(self, url: str) -> bool:
-        row = self.conn.execute("SELECT 1 FROM studies WHERE url = ?", (url,)).fetchone()
-        return row is not None
+        study_id = self.extract_study_id(url)
+        
+        if self.has_link:
+            if study_id:
+                row = self.conn.execute(
+                    "SELECT 1 FROM studies WHERE link = ? OR link LIKE ?", (url, f"%{study_id}%")
+                ).fetchone()
+            else:
+                row = self.conn.execute("SELECT 1 FROM studies WHERE link = ?", (url,)).fetchone()
+            if row:
+                return True
+
+        if self.has_url:
+            if study_id:
+                row = self.conn.execute(
+                    "SELECT 1 FROM studies WHERE url = ? OR url LIKE ?", (url, f"%{study_id}%")
+                ).fetchone()
+            else:
+                row = self.conn.execute("SELECT 1 FROM studies WHERE url = ?", (url,)).fetchone()
+            if row:
+                return True
+
+        return False
 
     def upsert(self, study: Study) -> bool:
         """Returns True if inserted for the first time."""
-        existing = self.conn.execute(
-            "SELECT url FROM studies WHERE url = ?", (study.url,)
-        ).fetchone()
-        if existing is None:
+        if self.has(study.url):
+            return False
+
+        if self.has_link:
+            payout_val = study.reward
+            self.conn.execute(
+                "INSERT INTO studies (title, link, payout) VALUES (?, ?, ?)",
+                (study.title, study.url, payout_val),
+            )
+            self.conn.commit()
+            return True
+        elif self.has_url:
             self.conn.execute(
                 """
                 INSERT INTO studies (
@@ -123,23 +166,7 @@ class StudyStore:
             )
             self.conn.commit()
             return True
-        self.conn.execute(
-            """
-            UPDATE studies
-               SET title = ?, reward = ?, summary = ?, posted_hint = ?, source = ?, last_seen_at = ?
-             WHERE url = ?
-            """,
-            (
-                study.title,
-                study.reward,
-                study.summary,
-                study.posted_hint,
-                study.source,
-                study.last_seen_at,
-                study.url,
-            ),
-        )
-        self.conn.commit()
+            
         return False
 
     def close(self) -> None:
