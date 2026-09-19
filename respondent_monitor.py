@@ -48,8 +48,8 @@ USER_AGENT = (
 
 
 def resolve_db_path() -> str:
-    """Return DB path from env, falling back to /data or local dir."""
-    env_path = os.getenv("DB_PATH", "").strip()
+    """Return DB path from env, checking DB_PATH then DATABASE_PATH, falling back to /data or local dir."""
+    env_path = os.getenv("DB_PATH", "").strip() or os.getenv("DATABASE_PATH", "").strip()
     if env_path:
         return env_path
     # Prefer /data (Render persistent disk mount point)
@@ -247,33 +247,46 @@ def build_telegram_message(studies: List[Study]) -> str:
     return "\n\n---\n\n".join(lines)
 
 
+def get_telegram_chat_ids() -> List[str]:
+    raw_ids = os.getenv("TELEGRAM_CHAT_IDS", "").strip()
+    if raw_ids:
+        chat_ids = [c.strip() for c in raw_ids.split(",") if c.strip()]
+        if chat_ids:
+            return chat_ids
+    fallback_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+    if fallback_id:
+        return [fallback_id]
+    return []
+
+
 def send_telegram_alert(message: str) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
+    chat_ids = get_telegram_chat_ids()
+    if not token or not chat_ids:
         logging.warning("Telegram credentials are not set; skipping alert.")
         return
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    logging.info("Attempting to send Telegram alert to chat_id: %s", chat_id)
-    try:
-        response = requests.post(
-            url,
-            json={"chat_id": chat_id, "text": message, "disable_web_page_preview": False},
-            timeout=30,
-        )
-        data = response.json() if response.text else {}
-        is_ok = data.get("ok")
-        if response.status_code == 200 and is_ok:
-            logging.info("Telegram alert sent successfully.")
-        else:
-            logging.error(
-                "Telegram rejected message. Status: %s, Response: %s. "
-                "Ensure bot token is correct, chat_id is valid, and bot has been started.",
-                response.status_code, response.text
+    for chat_id in chat_ids:
+        logging.info("Attempting to send Telegram alert to chat_id: %s", chat_id)
+        try:
+            response = requests.post(
+                url,
+                json={"chat_id": chat_id, "text": message, "disable_web_page_preview": False},
+                timeout=30,
             )
-    except Exception as exc:
-        logging.error("Failed to send Telegram alert (network/other issue): %s", exc)
+            data = response.json() if response.text else {}
+            is_ok = data.get("ok")
+            if response.status_code == 200 and is_ok:
+                logging.info("Telegram alert sent successfully to %s.", chat_id)
+            else:
+                logging.error(
+                    "Telegram rejected message for chat_id %s. Status: %s, Response: %s. "
+                    "Ensure bot token is correct, chat_id is valid, and bot has been started.",
+                    chat_id, response.status_code, response.text
+                )
+        except Exception as exc:
+            logging.error("Failed to send Telegram alert to %s (network/other issue): %s", chat_id, exc)
 
 
 def is_unmoderated_study(text: str) -> bool:
@@ -441,23 +454,36 @@ def run_once() -> int:
 
 def check_telegram_config() -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    if not token or not chat_id:
-        logging.warning("Startup check: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing. Alerts are disabled.")
+    chat_ids = get_telegram_chat_ids()
+    if not token or not chat_ids:
+        logging.warning("Startup check: TELEGRAM_BOT_TOKEN or chat IDs (TELEGRAM_CHAT_IDS / TELEGRAM_CHAT_ID) is missing. Alerts are disabled.")
     else:
         masked_token = f"{token[:4]}...{token[-4:]}" if len(token) > 8 else "***"
-        logging.info("Startup check: Telegram configured (Chat ID: %s, Token: %s)", chat_id, masked_token)
+        logging.info("Startup check: Telegram configured for %d chat ID(s): %s (Token: %s)", len(chat_ids), ", ".join(chat_ids), masked_token)
+
+
+def get_check_interval() -> int:
+    raw = os.getenv("CHECK_INTERVAL_SECONDS", "").strip()
+    if raw:
+        try:
+            val = int(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return 600
 
 
 if __name__ == "__main__":
     setup_logging()
     check_telegram_config()
+    interval = get_check_interval()
     try:
         while True:
             logging.info("Starting monitoring cycle...")
             run_once()
-            logging.info("Cycle complete. Sleeping for 10 minutes...")
-            time.sleep(600)
+            logging.info("Cycle complete. Sleeping for %d seconds...", interval)
+            time.sleep(interval)
     except KeyboardInterrupt:
         logging.warning("Interrupted by user.")
         raise SystemExit(130)
