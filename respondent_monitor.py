@@ -39,8 +39,6 @@ from typing import List, Optional, Set
 from urllib.parse import urljoin, urlparse
 
 import requests
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
-from playwright.sync_api import sync_playwright
 
 DEFAULT_BROWSE_URL = "https://www.respondent.io/research-projects"
 USER_AGENT = (
@@ -323,87 +321,86 @@ def is_diary_study(text: str) -> bool:
     return False
 
 
-def harvest_study_links(page, browse_url: str, max_links: int) -> List[str]:
-    logging.info("Opening browse page: %s", browse_url)
-    page.goto(browse_url, wait_until="domcontentloaded", timeout=90000)
-    page.wait_for_timeout(4000)
 
-    # Scroll to reveal lazy-loaded results (Limit to 1 to save massive amount of memory)
-    for _ in range(1):
-        page.mouse.wheel(0, 4000)
-        page.wait_for_timeout(1500)
-
-    raw_links: Set[str] = set()
-    hrefs = page.locator("a").evaluate_all(
-        "elements => elements.map(el => el.getAttribute('href')).filter(Boolean)"
-    )
-    for href in hrefs:
-        if "/projects/view/" in href:
-            normalized = normalize_url(href, browse_url)
-            if normalized:
-                raw_links.add(normalized)
-
-    links = sorted(raw_links)
-    logging.info("Found %d candidate study links.", len(links))
-    return links[:max_links]
+API_PROJECTS_URL = "https://www.respondent.io/api/projects"
 
 
-def scrape_study_page(page, url: str) -> Optional[Study]:
-    logging.info("Scraping study page: %s", url)
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=90000)
-        page.wait_for_timeout(2500)
-    except PlaywrightTimeoutError:
-        logging.warning("Timed out loading %s", url)
-        return None
-
-    title = ""
-    for selector in ["h1", "main h1", "header h1", "meta[property='og:title']"]:
+def fetch_public_api_studies(max_studies: int = 50) -> List[Study]:
+    """Fetch public unauthenticated study listings directly from Respondent's public API."""
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+    }
+    studies: List[Study] = []
+    page = 1
+    
+    while len(studies) < max_studies:
+        url = f"{API_PROJECTS_URL}?page={page}"
+        logging.info("Fetching public API page %d: %s", page, url)
         try:
-            if selector.startswith("meta"):
-                content = page.locator(selector).get_attribute("content")
-                title = clean_text(content or "")
-            else:
-                title = clean_text(page.locator(selector).first.inner_text(timeout=3000))
-            if title:
+            resp = requests.get(url, headers=headers, timeout=15)
+            if resp.status_code != 200:
+                logging.warning("API returned HTTP %d", resp.status_code)
                 break
-        except Exception:
-            continue
-
-    # Fetch body text once and reuse (avoids double evaluate)
-    try:
-        body_text = page.locator("body").inner_text(timeout=5000)
-    except Exception:
-        body_text = ""
-
-    if not title and not body_text:
-        return None
-
-    reward = extract_reward(body_text)
-    posted_hint = extract_posted_hint(body_text)
-    summary = extract_summary_from_body(body_text, title)
-    now = utc_now_iso()
-
-    return Study(
-        url=url,
-        title=title,
-        reward=reward,
-        summary=summary,
-        full_body_text=body_text,
-        posted_hint=posted_hint,
-        source="public",
-        first_seen_at=now,
-        last_seen_at=now,
-    )
+                
+            data = resp.json()
+            results = data.get("results", [])
+            if not results:
+                logging.info("No more results on API page %d", page)
+                break
+                
+            now = utc_now_iso()
+            for item in results:
+                study_id = str(item.get("id", "")).strip()
+                title = clean_text(item.get("name", ""))
+                description = clean_text(item.get("description", ""))
+                remuneration = item.get("respondentRemuneration")
+                reward = f"${remuneration}" if remuneration is not None else "Not specified"
+                kind = item.get("kindOfResearch")
+                published_at = str(item.get("publishedAt", "")).strip()
+                referral_link = str(item.get("referralLink", "")).strip()
+                
+                if referral_link:
+                    study_url = referral_link
+                elif study_id:
+                    study_url = f"https://app.respondent.io/projects/view/{study_id}"
+                else:
+                    continue
+                    
+                full_body_text = f"{title} {description}"
+                summary = textwrap.shorten(description, width=300, placeholder="...") if description else ""
+                
+                study_obj = Study(
+                    url=study_url,
+                    title=title,
+                    reward=reward,
+                    summary=summary,
+                    full_body_text=full_body_text,
+                    posted_hint=published_at,
+                    source="public_api",
+                    first_seen_at=now,
+                    last_seen_at=now,
+                )
+                setattr(study_obj, "kind_of_research", kind)
+                studies.append(study_obj)
+                
+                if len(studies) >= max_studies:
+                    break
+                    
+            page += 1
+        except Exception as exc:
+            logging.error("Failed to fetch public API studies: %s", exc)
+            break
+            
+    logging.info("Fetched %d total studies from public API.", len(studies))
+    return studies
 
 
 def run_once() -> int:
-    browse_url = os.getenv("RESPONDENT_BROWSE_URL", DEFAULT_BROWSE_URL).strip() or DEFAULT_BROWSE_URL
-    headless = os.getenv("HEADLESS", "1").strip() != "0"
     try:
-        max_studies = int(os.getenv("MAX_STUDIES_PER_RUN", "20"))
+        max_studies = int(os.getenv("MAX_STUDIES_PER_RUN", "50"))
     except ValueError:
-        max_studies = 20
+        max_studies = 50
 
     db_path = resolve_db_path()
     logging.info("Using DB at: %s", db_path)
@@ -411,90 +408,26 @@ def run_once() -> int:
     store = StudyStore(db_path)
     new_studies: List[Study] = []
 
-    # Phase 1: Harvest links using a temporary context
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=headless,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--js-flags=--max-old-space-size=128"]
-        )
-        browse_context = browser.new_context(user_agent=USER_AGENT)
+    studies = fetch_public_api_studies(max_studies=max_studies)
+
+    for study in studies:
+        filter_blob = f"{study.title} {study.summary} {study.full_body_text}"
+        kind_of_research = getattr(study, "kind_of_research", None)
         
-        # Block heavy visual resources
-        def intercept_route(route):
-            if route.request.resource_type in ["image", "media", "font", "stylesheet", "websocket"]:
-                route.abort()
-            else:
-                route.continue_()
-                
-        browse_context.route("**/*", intercept_route)
-        main_page = browse_context.new_page()
-        links = harvest_study_links(main_page, browse_url, max_studies)
-        browser.close()
+        # Accept if kindOfResearch == 4 (Unmoderated) or text detection matches
+        is_unmod = (kind_of_research == 4) or is_unmoderated_study(filter_blob)
+        if not is_unmod:
+            logging.info("Skipped (not Unmoderated Study): %s", study.title)
+            continue
 
-    if not links:
-        logging.warning("No study links found on browse page.")
+        if is_diary_study(filter_blob):
+            logging.info("Accepted (Unmoderated Study + Diary Study): %s", study.title)
+        else:
+            logging.info("Accepted (Unmoderated Study): %s", study.title)
 
-    # Phase 2: Scrape in small batches to guarantee Chromium memory is fully wiped
-    batch_size = 5
-    for i in range(0, len(links), batch_size):
-        chunk = links[i : i + batch_size]
-        
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=headless,
-                args=[
-                    "--no-sandbox", 
-                    "--disable-setuid-sandbox", 
-                    "--disable-dev-shm-usage", 
-                    "--disable-gpu",
-                    "--disable-software-rasterizer",
-                    "--disable-extensions",
-                    "--mute-audio",
-                    "--js-flags=--max-old-space-size=128"
-                ],
-            )
-            
-            for url in chunk:
-                study_context = browser.new_context(user_agent=USER_AGENT)
-                study_context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font", "stylesheet", "websocket"] else route.continue_())
-                study_page = study_context.new_page()
-                
-                try:
-                    study = scrape_study_page(study_page, url)
-                    if not study:
-                        continue
-                    
-                    # Combine everything to guarantee we don't miss metadata
-                    filter_blob = f"{study.title} {study.summary} {study.full_body_text}"
-                    
-                    if "unmoderated study" in filter_blob.lower():
-                        logging.info("DEBUG: 'unmoderated study' matched in text for %s", study.title)
-                        
-                    if not is_unmoderated_study(filter_blob):
-                        logging.info("Skipped (not Unmoderated Study): %s", study.title)
-                        excerpt = study.full_body_text[:120].replace('\n', ' ')
-                        logging.info("DEBUG Excerpt: %s...", excerpt)
-                        continue
-
-                    if is_diary_study(filter_blob):
-                        logging.info("Accepted (Unmoderated Study + Diary Study): %s", study.title)
-                    else:
-                        logging.info("Accepted (Unmoderated Study): %s", study.title)
-
-                    was_new = store.upsert(study)
-                    if was_new:
-                        new_studies.append(study)
-                    time.sleep(1.5)
-                except Exception as exc:
-                    logging.exception("Failed to process %s: %s", url, exc)
-                    continue
-                finally:
-                    study_context.close()
-            
-            browser.close()
-            
-        # Force Python to deep clean memory between batches
-        gc.collect()
+        was_new = store.upsert(study)
+        if was_new:
+            new_studies.append(study)
 
     if new_studies:
         logging.info("%d new studies found.", len(new_studies))
