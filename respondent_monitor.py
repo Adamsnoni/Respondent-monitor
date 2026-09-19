@@ -262,10 +262,23 @@ def extract_summary_from_body(body_text: str, title: str) -> str:
     return ""
 
 
-def build_telegram_message(studies: List[Study]) -> str:
-    lines = [f"🔔 New Respondent studies: {len(studies)}"]
+def build_telegram_messages(studies: List[Study], max_chars_per_msg: int = 3500) -> List[str]:
+    """
+    Build one or more Telegram alert messages.
+    Splits long alerts into multiple messages under 3500 characters each.
+    Delivers ALL studies without dropping or truncating any study across chunks.
+    """
+    if not studies:
+        return []
+
+    header = f"🔔 New Respondent studies: {len(studies)}\n\n"
+    separator = "\n\n---\n\n"
     
-    for study in studies[:10]:
+    messages: List[str] = []
+    current_blocks: List[str] = []
+    current_length = len(header)
+
+    for study in studies:
         title = study.title or "Untitled study"
         reward = study.reward or "Not specified"
         summary = study.summary or "No description"
@@ -280,7 +293,11 @@ def build_telegram_message(studies: List[Study]) -> str:
             study_type = "Moderated"
         else:
             study_type = "Unknown"
-            
+
+        # Handle a single unusually long study description gracefully
+        if len(summary) > 2500:
+            summary = textwrap.shorten(summary, width=2500, placeholder="...")
+
         study_block = (
             "🚨 New Respondent Study\n\n"
             f"• {title} | {reward}\n"
@@ -289,12 +306,27 @@ def build_telegram_message(studies: List[Study]) -> str:
             f"{summary}\n\n"
             f"🔗 {study.url}"
         )
-        lines.append(study_block)
-            
-    if len(studies) > 10:
-        lines.append(f"...and {len(studies) - 10} more")
-        
-    return "\n\n---\n\n".join(lines)
+
+        block_cost = len(study_block) + (len(separator) if current_blocks else 0)
+
+        if current_blocks and (current_length + block_cost > max_chars_per_msg):
+            messages.append(header + separator.join(current_blocks))
+            current_blocks = [study_block]
+            current_length = len(header) + len(study_block)
+        else:
+            current_blocks.append(study_block)
+            current_length += block_cost
+
+    if current_blocks:
+        messages.append(header + separator.join(current_blocks))
+
+    return messages
+
+
+def build_telegram_message(studies: List[Study]) -> str:
+    """Backwards-compatible single message builder."""
+    msgs = build_telegram_messages(studies)
+    return msgs[0] if msgs else ""
 
 
 def get_telegram_chat_ids() -> List[str]:
@@ -309,34 +341,40 @@ def get_telegram_chat_ids() -> List[str]:
     return []
 
 
-def send_telegram_alert(message: str) -> None:
+def send_telegram_alert(messages: List[str] | str) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_ids = get_telegram_chat_ids()
-    if not token or not chat_ids:
-        logging.warning("Telegram credentials are not set; skipping alert.")
+    if not token or not chat_ids or not messages:
+        logging.warning("Telegram credentials or messages are missing; skipping alert.")
         return
+
+    msg_list = [messages] if isinstance(messages, str) else messages
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     for chat_id in chat_ids:
-        logging.info("Attempting to send Telegram alert to chat_id: %s", chat_id)
-        try:
-            response = requests.post(
-                url,
-                json={"chat_id": chat_id, "text": message, "disable_web_page_preview": False},
-                timeout=30,
-            )
-            data = response.json() if response.text else {}
-            is_ok = data.get("ok")
-            if response.status_code == 200 and is_ok:
-                logging.info("Telegram alert sent successfully to %s.", chat_id)
-            else:
-                logging.error(
-                    "Telegram rejected message for chat_id %s. Status: %s, Response: %s. "
-                    "Ensure bot token is correct, chat_id is valid, and bot has been started.",
-                    chat_id, response.status_code, response.text
+        logging.info("Sending Telegram alert in %d message(s) to chat_id: %s", len(msg_list), chat_id)
+        for idx, msg in enumerate(msg_list, 1):
+            try:
+                response = requests.post(
+                    url,
+                    json={"chat_id": chat_id, "text": msg, "disable_web_page_preview": False},
+                    timeout=30,
                 )
-        except Exception as exc:
-            logging.error("Failed to send Telegram alert to %s (network/other issue): %s", chat_id, exc)
+                data = response.json() if response.text else {}
+                is_ok = data.get("ok")
+                if response.status_code == 200 and is_ok:
+                    logging.info("Telegram alert message %d/%d sent successfully to chat_id %s.", idx, len(msg_list), chat_id)
+                else:
+                    logging.error(
+                        "Telegram rejected message %d/%d for chat_id %s. Status: %s, Response: %s.",
+                        idx, len(msg_list), chat_id, response.status_code, response.text
+                    )
+            except Exception as exc:
+                logging.error(
+                    "Failed to send Telegram alert message %d/%d to chat_id %s (network/other issue): %s",
+                    idx, len(msg_list), chat_id, exc
+                )
+            time.sleep(0.5)
 
 
 def is_unmoderated_study(text: str) -> bool:
@@ -494,7 +532,8 @@ def run_once() -> int:
 
     if new_studies:
         logging.info("%d new studies found.", len(new_studies))
-        send_telegram_alert(build_telegram_message(new_studies))
+        messages = build_telegram_messages(new_studies)
+        send_telegram_alert(messages)
     else:
         logging.info("No new studies found.")
 
